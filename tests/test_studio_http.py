@@ -21,7 +21,8 @@ class StudioHTTPTests(unittest.TestCase):
         root = Path(self.tmp.name)
         release = root / 'releases' / ('a' * 40) / 'app'
         release.mkdir(parents=True)
-        shutil.copy(Path(__file__).resolve().parents[1] / 'app/entry.php', release / 'entry.php')
+        for module in (Path(__file__).resolve().parents[1] / 'app').glob('*.php'):
+            shutil.copy(module, release / module.name)
         public = root / 'public'
         public.mkdir()
         (public/'index.php').write_text("<?php define('STUDIO_RELEASE', '"+'a'*40+"'); require __DIR__.'/../releases/"+'a'*40+"/app/entry.php';")
@@ -30,7 +31,9 @@ class StudioHTTPTests(unittest.TestCase):
             port = sock.getsockname()[1]
         self.base = f'http://127.0.0.1:{port}/'
         (root/'.env').write_text('APP_URL='+self.base.rstrip('/')+'\n')
-        self.proc = subprocess.Popen(['php','-S',f'127.0.0.1:{port}','-t',str(public)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        sessions = root/'sessions'
+        sessions.mkdir(mode=0o700)
+        self.proc = subprocess.Popen(['php','-d','session.save_path='+str(sessions),'-S',f'127.0.0.1:{port}','-t',str(public)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.client = build_opener(HTTPCookieProcessor(http.cookiejar.CookieJar()))
         for _ in range(100):
             try:
