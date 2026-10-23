@@ -138,6 +138,38 @@ class DeploymentTests(unittest.TestCase):
             self.run_deploy()
         self.assertEqual(self.ftp.writes, [])
 
+    def test_refuses_to_overwrite_unrelated_chat_controller(self):
+        self.ftp.files['/public/mcp.php'] = b'existing-mcp-server'
+        with self.assertRaisesRegex(MODULE.DeploymentError, 'public/mcp.php ya existe'):
+            self.run_deploy()
+        self.assertEqual(self.ftp.writes, [])
+
+    def test_discovery_preserves_existing_acme_files(self):
+        self.ftp.directories.update({'/public/.well-known', '/public/.well-known/acme-challenge'})
+        path='/public/.well-known/acme-challenge/existing-challenge'
+        self.ftp.files[path]=b'certificate-challenge'
+        self.run_deploy()
+        self.assertEqual(self.ftp.files[path], b'certificate-challenge')
+        self.assertNotIn(path, self.ftp.writes)
+        self.assertEqual(self.ftp.files['/public/mcp.php'],self.package['public/mcp.php'])
+
+    def test_chat_web_check_requires_discovery_and_oauth_challenge(self):
+        base='https://studio.eskalamos.com'
+        class Response:
+            def __init__(self,path,data): self.url=base+path; self.data=data
+            def __enter__(self): return self
+            def __exit__(self,*args): return False
+            def read(self,size): return json.dumps(self.data).encode()
+        responses=[Response('/.well-known/oauth-authorization-server/oauth.php',{'issuer':base+'/oauth.php'}),
+                   Response('/.well-known/oauth-protected-resource/mcp.php',{'resource':base+'/mcp.php'}),
+                   HTTPError(base+'/mcp.php',401,'Unauthorized',{'WWW-Authenticate':'Bearer resource_metadata="'+base+'/oauth.php?route=resource"'},None)]
+        with patch.object(MODULE,'urlopen',side_effect=responses) as requests:
+            MODULE.verify_chat_web(base)
+            self.assertEqual(requests.call_count,3)
+        with patch.object(MODULE,'urlopen',return_value=Response('/wrong',{})):
+            with self.assertRaisesRegex(MODULE.DeploymentError,'descubrimiento OAuth'):
+                MODULE.verify_chat_web(base)
+
     def test_read_denied_is_not_treated_as_missing(self):
         self.ftp.files["/public/index.php"] = b"unreadable-existing-application"
         self.ftp.denied.add("/public/index.php")
