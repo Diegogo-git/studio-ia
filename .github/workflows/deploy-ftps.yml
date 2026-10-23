@@ -1,0 +1,41 @@
+name: Desplegar Studio IA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: studio-production-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    name: Validar y desplegar en Nicalia
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Descargar codigo de la version seleccionada
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Validar sintaxis PHP y paquete de despliegue
+        run: |
+          php -l public/index.php
+          php -l app/entry.php
+          python3 scripts/deploy_ftps.py --validate-only
+
+      - name: Probar protecciones del despliegue
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Subir version por FTPS y comprobar HTTPS
+        env:
+          FTP_SERVER: ${{ secrets.FTP_SERVER || 'afrodita.dns-es.com' }}
+          FTP_USERNAME: ${{ secrets.FTP_USERNAME || 'deploy-studio@eskalamos.com' }}
+          FTP_PORT: ${{ secrets.FTP_PORT || '21' }}
+          FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
+          STUDIO_URL: https://studio.eskalamos.com
+        run: python3 scripts/deploy_ftps.py
