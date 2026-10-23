@@ -1,66 +1,44 @@
 # Studio IA · Eskalamos
 
-Base de instalacion del Studio y despliegue manual por FTPS a Nicalia. La pagina inicial indica que Higgsfield y ElevenLabs estan pendientes: todavia no genera contenido, no carga el .env y no contiene un panel de administracion ni autenticacion de usuarios.
+Panel privado en PHP 8.1+ para generar imágenes (Soul Standard), vídeos desde texto (Seedance 2.0, 4–15 segundos) y locuciones MP3 (ElevenLabs Multilingual v2). Las solicitudes salen del servidor; no usa la API de OpenAI.
 
-## Hosting
+## Configuración privada
 
-| Elemento | Configuracion |
-| --- | --- |
-| Subdominio | `https://studio.eskalamos.com` |
-| Raiz web | `/home5/cywqgkxj/studio.eskalamos.com/public` |
-| Raiz de la cuenta FTP | `/home5/cywqgkxj/studio.eskalamos.com` |
-| Servidor FTPS certificado | `afrodita.dns-es.com` |
-| Puerto | `21`, FTPS explicito y modo pasivo |
-| Usuario FTP | `deploy-studio@eskalamos.com` |
-| PHP objetivo | 8.5 actualizado, aplicado solo al subdominio |
+La raíz FTP es `/home5/cywqgkxj/studio.eskalamos.com`; la raíz web debe ser su carpeta `public/`. El `.env` real vive en la raíz FTP, fuera de `public/`. Copiar las variables de `.env.example`; nunca subir credenciales a GitHub. Se admiten las dos variables Higgsfield ID/secreto o una `HIGGSFIELD_API_KEY` completa. ElevenLabs usa `ELEVENLABS_API_KEY` y el ID de voz opcional `ELEVENLABS_DEFAULT_VOICE_ID`; el panel permite cambiar de voz sin cambiar la clave.
 
-La instalacion inicial es una comprobacion publica sin informacion privada. Los futuros modulos de generacion necesitaran autenticacion propia antes de habilitarse.
+Los campos del panel indican si falta una clave, pero guardarla no demuestra acceso a todos los modelos. El proveedor determina saldo, disponibilidad, moderación y tarifas. Cada generación requiere confirmar consumo de créditos. No se promete un coste exacto antes de la factura del proveedor.
 
-## Secretos de GitHub
+## Primer acceso
 
-En **Settings > Secrets and variables > Actions**, guardar `FTP_PASSWORD`. Los secretos opcionales `FTP_SERVER`, `FTP_USERNAME` y `FTP_PORT` reemplazan los valores predeterminados del cuadro anterior. No almacenar claves API como archivos del repositorio.
+El panel permanece cerrado mientras no haya contraseña. Desde Terminal de cPanel, en la raíz del Studio, generar un código de configuración con PHP: crear `storage/` con permisos 0700 y guardar en `storage/setup.json` un JSON con `token_hash` (SHA-256 de 32 bytes aleatorios representados como 64 caracteres hexadecimales) y `expires` (Unix, como máximo una hora). El archivo debe tener permisos 0600. Este paso no modifica el `.env`.
 
-## Activar el workflow de despliegue
+El propietario abre `https://studio.eskalamos.com/#setup=CODIGO` y elige personalmente una contraseña de al menos 12 caracteres. El fragmento no viaja al servidor ni a los registros HTTP. El código se envía solo al guardar el formulario, se valida con CSRF y caducidad, y se invalida después del uso. Se almacena únicamente un hash de contraseña en `storage/account.json`. También se admite `STUDIO_PASSWORD_HASH` para un hash configurado manualmente por el propietario. No hay contraseñas por defecto.
 
-Para cargar el paquete manualmente, extraer el ZIP en el ordenador y abrir el repositorio en GitHub. En **Add file > Upload files**, arrastrar las carpetas `app`, `public`, `scripts` y `tests`, junto con `README.md`, `.gitignore` y `.env.example`, y guardar el commit en `main`. No subir el ZIP como un archivo: GitHub no lo descomprime. Si el explorador oculta los nombres que empiezan por punto, activar su visualizacion.
+## Producción
 
-El archivo de automatizacion debe estar en `.github/workflows/deploy-ftps.yml` en `main`. La integracion de GitHub ha rechazado anteriormente escribir workflows (403). Si ese permiso sigue restringido, el propietario debe anadir el archivo preparado desde la interfaz de GitHub. No reemplazar el workflow de comprobacion FTPS existente.
+- Imágenes: una pieza por solicitud, formato y resolución 720p/1080p.
+- Vídeos: escena desde texto, 4–15 segundos, formato, 720p/1080p y audio nativo opcional. No incluye avatares sincronizados ni montaje automático con ElevenLabs.
+- Locuciones: hasta 2.500 caracteres, ID de voz editable, búsqueda en las voces de la cuenta y velocidad de 0,7 a 1,2. No clona ni crea voces.
+- Historial persistente en `storage/jobs.json`, privado y separado de las versiones. La consulta de trabajos pendientes se reanuda al abrir el panel. No necesita cron para seguir generando en Higgsfield, aunque la pestaña se cierre.
+- Los archivos de imagen/vídeo permanecen en el proveedor y sus enlaces pueden caducar: descargar al terminar. Los MP3 se guardan en el hosting y solo se sirven a sesiones autenticadas.
+- Higgsfield: `Idempotency-Key` persistida antes de enviar, recuperación del mismo envío tras respuesta incierta, consulta de estado y solicitud de cancelación. Una cancelación solo se marca definitiva cuando el proveedor la confirma en estado.
+- ElevenLabs: un envío incierto nunca se repite automáticamente. Revisar el historial del proveedor antes de crear otro.
+- Un propietario por instalación, sesiones Secure/HttpOnly/SameSite, CSRF, comprobación de origen, límites de intentos y de 30 generaciones/hora, validación de parámetros y rutas fijas al proveedor.
 
-Para anadirlo desde la web: **Add file > Create new file**, escribir `.github/workflows/deploy-ftps.yml`, pegar el contenido del archivo del paquete y guardar en `main` con **Commit changes**.
+## Despliegue
 
-Si los archivos llegan mediante una pull request, revisar e incorporar primero esa propuesta. Una vez el workflow y el codigo esten en `main`, abrir **Actions > Desplegar Studio IA > Run workflow > main > Run workflow**. Solo se ejecuta manualmente y solo despliega desde `main`; subir un commit no publica nada por si solo.
+GitHub Actions → **Desplegar Studio IA** → **Run workflow**, rama `main`. Usa `FTP_PASSWORD` y los ajustes FTPS existentes. El cliente verifica TLS, sube solo `public/index.php` y `app/entry.php`, crea versiones inmutables en `releases/<sha>/`, activa `current.json` de forma atómica y exige que `https://studio.eskalamos.com/?health=1` confirme el mismo SHA. Si falla, restaura el puntero anterior. Nunca sube `.env` ni reemplaza `storage/`, `.htaccess` o configuración PHP. No sobrescribe páginas de inicio ajenas.
 
-## Que hace el despliegue
+La carpeta de documentos debe ser `public/` y Cloudflare debe tener el registro A `studio` hacia `92.60.32.32`. La verificación HTTPS requiere un certificado válido del origen cuando se usa TLS estricto. No se relajan comprobaciones TLS.
 
-1. Valida la sintaxis de los dos archivos PHP y ejecuta las pruebas del proceso de despliegue.
-2. Verifica FTPS, el certificado y el acceso a `public/`.
-3. Comprueba si ya existe una pagina de inicio. Rechaza sobrescribir un `index.php` distinto o convivir con `index.html`/`index.htm` sin revision.
-4. Guarda el puntero previo y el manifiesto en `deployments/<id>/` y sube el codigo a `releases/<sha>/` fuera de la raiz web.
-5. Instala el controlador publico en la primera instalacion y activa la version mediante el renombrado de `current.json`.
-6. Consulta `https://studio.eskalamos.com/?health=1` mediante HTTPS y exige el mismo SHA del commit.
-7. Si la activacion o la comprobacion web falla, intenta restaurar el puntero anterior. Si tambien falla la conexion durante la restauracion, informa de que no se ha podido confirmar y conserva la copia para recuperacion manual.
-
-El proceso no borra archivos remotos. No modifica `.env`, `storage/`, `.htaccess`, `.user.ini`, `php.ini`, `.well-known/` ni `cgi-bin/`. El renombrado se comprueba mediante lectura; depende de que el servidor permita RNFR/RNTO en los directorios de esta cuenta FTP.
-
-La URL HTTPS y su certificado deben funcionar antes de desplegar. La comprobacion confirma ejecucion PHP y la version servida, pero no valida todavia las APIs, la base de datos ni el cron.
-
-## Recuperacion
-
-Cada despliegue guarda `deployments/<id>/previous-current.json` antes de activar la nueva version. Para recuperar manualmente, inspeccionar esa copia y su version; restaurar su contenido en `current.json` en la raiz privada del Studio y comprobar `/?health=1`. Conservar las carpetas de versiones mientras puedan ser necesarias. En una primera instalacion fallida, el puntero queda con `release: null` y se muestra HTTP 503, pendiente de activacion.
-
-## Desarrollo y comprobaciones
+## Pruebas sin gasto
 
 ```sh
-php -l public/index.php
 php -l app/entry.php
+php tests/test_studio.php
 python3 -m unittest discover -s tests -v
-python3 scripts/deploy_ftps.py --release 0000000000000000000000000000000000000000 --validate-only
 ```
 
-`scripts/deploy_ftps.py` usa solo la biblioteca estandar de Python. Las pruebas simulan el sistema FTP y no utilizan credenciales ni conexiones de produccion.
+Las pruebas de aplicación usan transporte simulado; las HTTP levantan un PHP aislado con credenciales ficticias y comprueban acceso, CSRF, configuración de una sola vez y cierre de sesión. Ninguna prueba llama a endpoints de generación reales. La autenticación real de Higgsfield se puede verificar consultando un UUID de solicitud inexistente: clave ficticia 401 y clave configurada 404, sin generar contenido. Esto no comprueba una generación completa ni el acceso a un modelo concreto.
 
-Los archivos desplegables se enumeran expresamente en el script. Al ampliar la aplicacion, actualizar esa lista junto con sus pruebas; no sustituirla por una subida indiscriminada del repositorio.
-
-## Configuracion futura de APIs
-
-Crear `.env` en la raiz privada del Studio tomando `.env.example` como referencia. Las claves permaneceran fuera de `public/` y de Git. No se necesita una clave de la API de OpenAI para esta base de instalacion.
+Documentación: [Higgsfield](https://docs.higgsfield.ai/docs/llms.txt), [Soul Standard](https://open.higgsfield.ai/models/higgsfield-ai/soul/standard/api-reference), [Seedance 2.0](https://open.higgsfield.ai/models/bytedance/seedance-2.0/text-to-video/api-reference), [ElevenLabs TTS](https://elevenlabs.io/docs/api-reference/text-to-speech/convert).
