@@ -26,6 +26,7 @@ jobs:
         run: |
           php -l public/index.php
           php -l app/entry.php
+          php tests/test_studio.php
           python3 scripts/deploy_ftps.py --validate-only
 
       - name: Probar protecciones del despliegue
