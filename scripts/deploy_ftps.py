@@ -16,6 +16,7 @@ import sys
 import time
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
 
 
 class DeploymentError(Exception):
@@ -107,20 +108,25 @@ def verify_web(base_url: str, release: str):
             or parsed.path not in ("", "/") or parsed.query or parsed.fragment):
         raise DeploymentError("STUDIO_URL debe ser https://studio.eskalamos.com sin rutas ni parametros.")
     url = base_url.rstrip("/") + "/?health=1&check=" + secrets.token_hex(8)
+    last_failure = "respuesta no valida"
     for attempt in range(3):
         try:
-            request = Request(url, headers={"Cache-Control": "no-cache"})
+            request = Request(url, headers={"Cache-Control": "no-cache", "User-Agent": "StudioIA-Deploy/1.0"})
             with urlopen(request, timeout=20, context=ssl.create_default_context()) as response:
                 if urlsplit(response.url).hostname != parsed.hostname:
                     raise DeploymentError("La comprobacion web se ha redirigido a otro dominio.")
                 result = json.loads(response.read(65536))
             if result.get("app") == "studio-ia" and result.get("status") == "ok" and result.get("release") == release:
                 return
+        except HTTPError as exc:
+            last_failure = "HTTP " + str(exc.code)
+        except URLError:
+            last_failure = "fallo de DNS, conexion o certificado"
         except Exception:
-            pass
+            last_failure = "respuesta no valida"
         if attempt < 2:
             time.sleep(2)
-    raise DeploymentError("La web no confirma la version subida mediante HTTPS.")
+    raise DeploymentError("La web no confirma la version subida mediante HTTPS: " + last_failure + ".")
 
 
 def deploy(remote: Remote, package: dict[str, bytes], release: str, deployment_id: str, check_web):
@@ -168,7 +174,7 @@ def deploy(remote: Remote, package: dict[str, bytes], release: str, deployment_i
     try:
         remote.replace("current.json", current, staging, "next-current.json")
         check_web(release)
-    except Exception:
+    except Exception as failure:
         # A lost connection can occur after RNTO succeeded. Always attempt to
         # restore the saved pointer; do not assume that a failed command means
         # the live version did not change.
@@ -176,7 +182,7 @@ def deploy(remote: Remote, package: dict[str, bytes], release: str, deployment_i
             remote.replace("current.json", previous if previous is not None else payload({"release": None}), staging, "restore-current.json")
         except Exception:
             raise DeploymentError("Fallo de activacion y restauracion no confirmada. Revisar current.json con cPanel y la copia previous-current.json de este despliegue.") from None
-        raise DeploymentError("La comprobacion web fallo; se restauro el puntero anterior. En la primera instalacion el Studio queda pendiente de activacion.") from None
+        raise DeploymentError("La comprobacion web fallo; se restauro el puntero anterior. " + (str(failure) if isinstance(failure, DeploymentError) else "Fallo de activacion.")) from None
     print("Version activada y comprobada por HTTPS.")
     print("No se han modificado .env, storage/, .htaccess ni los ajustes PHP del hosting.")
 
