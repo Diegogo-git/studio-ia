@@ -5,6 +5,8 @@ from pathlib import Path
 import posixpath
 import tempfile
 import unittest
+from unittest.mock import patch
+from urllib.error import HTTPError
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -74,6 +76,24 @@ class DeploymentTests(unittest.TestCase):
 
     def run_deploy(self, check=lambda version: None):
         MODULE.deploy(self.remote, self.package, RELEASE, "test-release", check)
+
+    def test_web_check_identifies_the_deployment_client(self):
+        class Response:
+            url = "https://studio.eskalamos.com/?health=1"
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self, size): return MODULE.payload({"status": "ok", "app": "studio-ia", "release": RELEASE})
+        with patch.object(MODULE, "urlopen", return_value=Response()) as request:
+            MODULE.verify_web("https://studio.eskalamos.com", RELEASE)
+        self.assertEqual(request.call_args.args[0].get_header("User-agent"), "StudioIA-Deploy/1.0")
+        self.assertIsNotNone(request.call_args.kwargs["context"])
+
+    def test_web_check_reports_http_status_without_server_body(self):
+        error = HTTPError("https://studio.eskalamos.com", 403, "private-server-detail", {}, None)
+        with patch.object(MODULE, "urlopen", side_effect=error), patch.object(MODULE.time, "sleep"):
+            with self.assertRaisesRegex(MODULE.DeploymentError, "HTTP 403") as raised:
+                MODULE.verify_web("https://studio.eskalamos.com", RELEASE)
+        self.assertNotIn("private-server-detail", str(raised.exception))
 
     def test_success_preserves_credentials_storage_and_cpanel_settings(self):
         protected = {"/.env": b"never-publish-this-secret", "/storage/audio.mp3": b"audio",
