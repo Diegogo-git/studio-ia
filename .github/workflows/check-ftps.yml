@@ -1,0 +1,86 @@
+name: Comprobar conexion FTPS
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: studio-ftps-check
+  cancel-in-progress: false
+
+jobs:
+  check-ftps:
+    name: Autenticacion y acceso al Studio
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Comprobar FTPS explicito sin modificar archivos
+        env:
+          FTP_SERVER: ${{ secrets.FTP_SERVER || 'ftp.eskalamos.es' }}
+          FTP_USERNAME: ${{ secrets.FTP_USERNAME || 'deploy-studio@eskalamos.com' }}
+          FTP_PORT: ${{ secrets.FTP_PORT || '21' }}
+          FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
+        shell: python
+        run: |
+          import ftplib
+          import os
+          import socket
+          import ssl
+          import sys
+
+          def fail(message):
+              print("::error::" + message)
+              sys.exit(1)
+
+          host = os.environ.get("FTP_SERVER", "").strip()
+          username = os.environ.get("FTP_USERNAME", "").strip()
+          password = os.environ.get("FTP_PASSWORD", "")
+          if not password:
+              fail("Falta FTP_PASSWORD en Settings > Secrets and variables > Actions.")
+          if not host or not username:
+              fail("Faltan el servidor o el usuario FTP.")
+          try:
+              port = int(os.environ.get("FTP_PORT", "21"))
+              if not 1 <= port <= 65535:
+                  raise ValueError
+          except ValueError:
+              fail("FTP_PORT debe ser un puerto entre 1 y 65535.")
+
+          context = ssl.create_default_context()
+          context.minimum_version = ssl.TLSVersion.TLSv1_2
+          ftp = ftplib.FTP_TLS(context=context, timeout=25)
+          stage = "connect"
+          try:
+              ftp.connect(host, port)
+              stage = "login"
+              ftp.login(username, password)
+              stage = "data"
+              ftp.prot_p()
+              ftp.set_pasv(True)
+              ftp.nlst()
+              print("FTPS explicito: conexion, certificado, autenticacion y listado correctos.")
+              stage = "public"
+              ftp.cwd("public")
+              ftp.nlst()
+              print("Carpeta public accesible desde la raiz de esta cuenta FTP.")
+              print("Prueba terminada: no se han subido, borrado ni modificado archivos.")
+          except ssl.SSLCertVerificationError:
+              fail("El certificado TLS no es valido para el host configurado. Comprueba en cPanel el hostname certificado del servidor. No desactives la verificacion TLS.")
+          except ssl.SSLError:
+              fail("Error TLS al establecer la conexion cifrada. Revisa la configuracion FTPS con Nicalia.")
+          except socket.gaierror:
+              fail("No se puede resolver el servidor FTP configurado.")
+          except (TimeoutError, ConnectionError):
+              fail("Conexion interrumpida o agotada. Revisa el puerto y los permisos de red del hosting.")
+          except ftplib.error_perm:
+              if stage == "login":
+                  fail("El servidor ha rechazado la autenticacion. Revisa el usuario completo y FTP_PASSWORD.")
+              if stage == "public":
+                  fail("La cuenta autentica, pero public/ no es accesible. Comprueba que su directorio base sea studio.eskalamos.com/ y que public/ exista.")
+              fail("El servidor ha rechazado la operacion de lectura FTPS.")
+          except (ftplib.error_temp, ftplib.error_reply, ftplib.error_proto, EOFError, OSError):
+              fail("No se pudo completar la prueba FTPS. Revisa conectividad, modo pasivo y permisos con Nicalia.")
+          finally:
+              ftp.close()
