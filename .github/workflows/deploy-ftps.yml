@@ -24,9 +24,9 @@ jobs:
 
       - name: Validar sintaxis PHP y paquete de despliegue
         run: |
-          php -l public/index.php
-          php -l app/entry.php
+          while IFS= read -r -d '' file; do php -l "$file"; done < <(find app public -name '*.php' -print0)
           php tests/test_studio.php
+          php tests/test_chat.php
           python3 scripts/deploy_ftps.py --validate-only
 
       - name: Probar protecciones del despliegue

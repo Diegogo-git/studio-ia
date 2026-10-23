@@ -23,8 +23,12 @@ class DeploymentError(Exception):
     pass
 
 
-PUBLIC_FILES = ("public/index.php",)
-PRIVATE_FILES = ("app/entry.php",)
+PUBLIC_FILES = (
+    "public/index.php", "public/mcp.php", "public/oauth.php", "public/studio-api.php", "public/worker.php",
+    "public/.well-known/oauth-authorization-server/oauth.php",
+    "public/.well-known/oauth-protected-resource/mcp.php",
+)
+PRIVATE_FILES = ("app/entry.php", "app/chat.php", "app/oauth.php")
 MARKER = b"STUDIO_IA_FRONT_CONTROLLER_V1"
 MAX_REMOTE_BYTES = 1024 * 1024
 
@@ -129,14 +133,55 @@ def verify_web(base_url: str, release: str):
     raise DeploymentError("La web no confirma la version subida mediante HTTPS: " + last_failure + ".")
 
 
+def verify_chat_web(base_url: str):
+    """Read-only OAuth discovery and unauthenticated MCP challenge; zero provider calls."""
+    base = base_url.rstrip("/")
+    expected = (
+        ("/.well-known/oauth-authorization-server/oauth.php", "issuer", base + "/oauth.php"),
+        ("/.well-known/oauth-protected-resource/mcp.php", "resource", base + "/mcp.php"),
+    )
+    for path, field, value in expected:
+        try:
+            request = Request(base + path, headers={"Cache-Control": "no-cache", "User-Agent": "StudioIA-Deploy/1.0"})
+            with urlopen(request, timeout=20, context=ssl.create_default_context()) as response:
+                if response.url != base + path or json.loads(response.read(65536)).get(field) != value:
+                    raise ValueError
+        except Exception:
+            raise DeploymentError("El descubrimiento OAuth del chat no responde como se esperaba.") from None
+    request = Request(base + "/mcp.php", data=b'{"jsonrpc":"2.0","id":1,"method":"initialize"}',
+                      headers={"Content-Type": "application/json", "User-Agent": "StudioIA-Deploy/1.0"})
+    try:
+        with urlopen(request, timeout=20, context=ssl.create_default_context()):
+            pass
+    except HTTPError as exc:
+        challenge = exc.headers.get("WWW-Authenticate", "")
+        if exc.code == 401 and 'resource_metadata="' + base + '/oauth.php?route=resource"' in challenge:
+            return
+    except Exception:
+        pass
+    raise DeploymentError("MCP no exige la autenticacion OAuth prevista.")
+
+
+def verify_release(base_url: str, release: str):
+    verify_web(base_url, release)
+    verify_chat_web(base_url)
+
+
 def deploy(remote: Remote, package: dict[str, bytes], release: str, deployment_id: str, check_web):
     # FTP / is already jailed to /home5/cywqgkxj/studio.eskalamos.com.
     remote.ftp.cwd("/")
     remote.ftp.cwd("public")
     remote.ftp.cwd("/")
-    existing_index = remote.read("public/index.php")
-    if existing_index is not None and existing_index != package["public/index.php"]:
-        raise DeploymentError("public/index.php ya existe y difiere del controlador previsto. Revisar antes de sobrescribirlo.")
+    missing_public = []
+    for relative in PUBLIC_FILES:
+        # Create only the exact discovery directories; preserve all other files.
+        if "/.well-known/" in relative:
+            remote.directory(relative.rsplit("/", 1)[0])
+        existing = remote.read(relative)
+        if existing is not None and existing != package[relative]:
+            raise DeploymentError(relative + " ya existe y difiere del controlador previsto. Revisar antes de sobrescribirlo.")
+        if existing is None:
+            missing_public.append(relative)
     for alternate in ("public/index.html", "public/index.htm"):
         if remote.read(alternate) is not None:
             raise DeploymentError("Hay una pagina de inicio previa. Revisar su prioridad antes de desplegar.")
@@ -168,8 +213,8 @@ def deploy(remote: Remote, package: dict[str, bytes], release: str, deployment_i
             remote.write(destination, package[relative])
     manifest = payload({"release": release, "files": {path: hashlib.sha256(data).hexdigest() for path, data in package.items()}})
     remote.write(staging + "/manifest.json", manifest)
-    if existing_index is None:
-        remote.replace("public/index.php", package["public/index.php"], staging, "index.php")
+    for position, relative in enumerate(missing_public):
+        remote.replace(relative, package[relative], staging, "controller-" + str(position) + ".php")
     current = payload({"release": release})
     try:
         remote.replace("current.json", current, staging, "next-current.json")
@@ -218,7 +263,7 @@ def main():
         ftp.set_pasv(True)
         deploy(remote=Remote(ftp), package=package, release=args.release,
                deployment_id=time.strftime("%Y%m%dT%H%M%S", time.gmtime()) + "-" + secrets.token_hex(6),
-               check_web=lambda release: verify_web(os.environ.get("STUDIO_URL", "https://studio.eskalamos.com"), release))
+               check_web=lambda release: verify_release(os.environ.get("STUDIO_URL", "https://studio.eskalamos.com"), release))
     finally:
         ftp.close()
 
