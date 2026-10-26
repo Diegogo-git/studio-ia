@@ -55,6 +55,7 @@ function studio_hf_key(array $env): string {
 function studio_input(array $in): array {
     $kind = $in['kind'] ?? '';
     if (!in_array($kind, ['image', 'video', 'speech'], true)) throw new StudioError('Selecciona imagen, vídeo o voz.');
+    if(isset($in['image_url'])&&$kind!=='video')throw new StudioError('La imagen de entrada solo se usa para crear vídeo.');
     $text = trim(is_string($in['prompt'] ?? null) ? $in['prompt'] : '');
     $limit = $kind === 'speech' ? 2500 : 6000;
     $len = preg_match_all('/./us', $text);
@@ -77,6 +78,11 @@ function studio_input(array $in): array {
         if (!is_bool($in['generate_audio'] ?? false)) throw new StudioError('El ajuste de audio no es válido.');
         $body['duration']=$duration; $body['generate_audio']=$in['generate_audio'] ?? false;
         $model='bytedance/seedance-2.0/text-to-video';
+        if(isset($in['image_url'])){
+            if(!studio_url($in['image_url']))throw new StudioError('La imagen de entrada necesita una URL HTTPS válida.');
+            $body['image_url']=$in['image_url'];unset($body['aspect_ratio']);
+            $model='bytedance/seedance-2.0/image-to-video';
+        }
     }
     return ['kind'=>$kind, 'provider'=>'higgsfield', 'model'=>$model, 'body'=>$body];
 }
@@ -179,6 +185,7 @@ function studio_poll(string $db, array $job, array $env): array {
     if ($status==='completed' && !$media) $message='El proveedor indica que terminó, pero todavía no devuelve un archivo. Revisa Requests en Higgsfield.';
     return studio_public_job(studio_update($db,$job['id'],['status'=>$status,'media'=>$media,'message'=>$message,'http'=>200,'correlation'=>$r['correlation']]));
 }
+require_once __DIR__.'/images.php';
 require_once __DIR__.'/chat.php';
 require_once __DIR__.'/oauth.php';
 if (defined('STUDIO_TESTING')) return;
