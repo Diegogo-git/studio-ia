@@ -65,6 +65,60 @@ try{
     check(str_starts_with($public['media'][0]['url'],'https://studio.eskalamos.com/studio-api.php?op=download'),'temporary audio link');
     parse_str(parse_url($public['media'][0]['url'],PHP_URL_QUERY),$query);
     check(!str_contains(file_get_contents($dir.'/media-links.json'),$query['token']),'download tokens stored hashed');
+    // Import a fictitious PNG, then animate its durable asset without live provider calls.
+    foreach(['127.0.0.1','10.0.0.1','169.254.169.254','100.64.0.1','192.0.0.1','198.18.0.1','224.0.0.1','240.0.0.1','::1']as$ip)check(!studio_image_public_ip($ip),'non-public image target denied');
+    check(studio_image_public_ip('8.8.8.8'),'public image address accepted');
+    rejects(fn()=>studio_image_target('http://example.test/x.png'));
+    rejects(fn()=>studio_image_target('https://user:pass@example.test/x.png'));
+    rejects(fn()=>studio_image_target('https://127.0.0.1/x.png'));
+    rejects(fn()=>studio_image_target('https://example.test:8443/x.png'));
+    $chunk=static fn($type,$data)=>pack('N',strlen($data)).$type.$data.pack('N',crc32($type.$data));
+    $png="\x89PNG\r\n\x1a\n".$chunk('IHDR',pack('NNCCCCC',320,568,8,2,0,0,0)).$chunk('IDAT',gzcompress(str_repeat("\0".str_repeat("\x90\xa0\xb0",320),568))).$chunk('IEND','');
+    check(studio_image_info($png)['height']===568,'real image bytes inspected');
+    rejects(fn()=>studio_image_info('<svg></svg>'));
+    rejects(fn()=>studio_image_info(str_repeat('x',10485761)),413);
+    $transfers=[];$presigns=0;$sent=[];
+    $GLOBALS['studio_test_image_transfer']=static function($url,$upload,$headers)use(&$transfers,$png):array{
+        $transfers[]=[$upload===null?'GET':'PUT',$headers];return ['http'=>200,'body'=>$upload===null?$png:''];
+    };
+    $GLOBALS['studio_test_transport']=static function($provider,$path,$env,$method,$body,$key)use(&$presigns,&$sent):array{
+        if($path==='files/generate-upload-url'){
+            $presigns++;check($body['content_type']==='image/png','presign matches inspected MIME');
+            return ['http'=>200,'error'=>0,'json'=>['upload_url'=>'https://storage.example.test/image?signature=private','public_url'=>'https://cdn.example.test/scene.png','upload_headers'=>['Content-Type'=>'image/png','x-amz-tagging'=>'retention=temporary']],'body'=>'','type'=>'application/json','correlation'=>'fixture'];
+        }
+        $sent[]=[$path,$body,$key];return ['http'=>202,'error'=>0,'json'=>['request_id'=>'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'],'body'=>'','type'=>'application/json','correlation'=>'fixture'];
+    };
+    $import=['request_key'=>'77777777-7777-4777-8777-777777777777','source_image'=>['download_url'=>'https://files.example.test/scene.png?temporary=secret','file_id'=>'file-fixture','mime_type'=>'image/jpeg']];
+    $asset=studio_image_import($dir,$env,$principal,$import);
+    check($asset['mime_type']==='image/png'&&$asset['width']===320,'MIME comes from bytes, not supplied file metadata');
+    check(!isset($asset['url'],$asset['owner'],$asset['fingerprint'],$asset['sha256']),'private asset fields hidden');
+    check(count($transfers)===2&&$presigns===1,'download, presign and PUT occur once');
+    check(!str_contains(json_encode($transfers),'fixture:key')&&in_array('x-amz-tagging: retention=temporary',$transfers[1][1],true),'upload headers retained without provider credentials');
+    $retry=$import;$retry['source_image']['download_url']='https://files.example.test/refreshed.png?temporary=renewed';
+    check(studio_image_import($dir,$env,$principal,$retry)['image_id']===$asset['image_id']&&count($transfers)===2,'same file ID and import key recover without another transfer');
+    $changed=$import;$changed['source_image']['file_id']='file-other';rejects(fn()=>studio_image_import($dir,$env,$principal,$changed),409);
+    rejects(fn()=>studio_image_import($dir,$env,['owner'=>'other'],$import),404);
+    rejects(fn()=>studio_image_import($dir,$env,$principal,$import+['image_url'=>'https://files.example.test/other.png']));
+    $video=['kind'=>'video','prompt'=>'La cortina se mueve suavemente. Cámara fija.','image_url'=>'https://cdn.example.test/scene.png','duration'=>5,'generate_audio'=>false];
+    $normalized=studio_input($video);
+    check($normalized['model']==='bytedance/seedance-2.0/image-to-video'&&!isset($normalized['body']['aspect_ratio']),'image-to-video uses the source aspect ratio and correct model');
+    $textVideo=$video;unset($textVideo['image_url']);check(studio_input($textVideo)['model']==='bytedance/seedance-2.0/text-to-video','text-to-video remains available');
+    rejects(fn()=>studio_input(array_replace($video,['kind'=>'image'])));
+    $animate=['request_key'=>'88888888-8888-4888-8888-888888888888','kind'=>'video','image_id'=>$asset['image_id'],'prompt'=>$video['prompt'],'duration'=>5,'accept_cost'=>true];
+    rejects(fn()=>studio_chat_create($dir,$env,$principal,array_replace($animate,['accept_cost'=>false])));
+    rejects(fn()=>studio_chat_create($dir,$env,['owner'=>'other'],$animate),404);
+    rejects(fn()=>studio_chat_create($dir,$env,$principal,$animate+['image_url'=>'https://files.example.test/bypass.png']));
+    $animation=studio_chat_create($dir,$env,$principal,$animate);
+    check($animation['status']==='prepared'&&!$sent,'animating an imported image queues without a generation call');
+    check(studio_chat_create($dir,$env,$principal,$animate)['id']===$animation['id'],'animation intent recovered');
+    check(!str_contains(file_get_contents($dir.'/jobs.json'),'temporary=secret'),'ChatGPT signed download URL is not persisted in a generation');
+    studio_chat_worker($dir,$env);studio_chat_worker($dir,$env);
+    check(count($sent)===1&&$sent[0][0]==='bytedance/seedance-2.0/image-to-video'&&$sent[0][1]['image_url']==='https://cdn.example.test/scene.png'&&!$sent[0][1]['generate_audio']&&$sent[0][2]===$animation['id'],'worker sends the uploaded reference once with audio disabled and stable idempotency');
+    $GLOBALS['studio_test_image_transfer']=static function(){throw new StudioError('Fixture upload failure',502);};
+    $failed=$import;$failed['request_key']='99999999-9999-4999-8999-999999999999';
+    rejects(fn()=>studio_image_import($dir,$env,$principal,$failed),502);
+    check(!isset(studio_read($dir.'/images.json')[$failed['request_key']]),'failed transfer does not register an image');
+    unset($GLOBALS['studio_test_image_transfer']);
     $pending=$request;$pending['request_key']='66666666-6666-4666-8666-666666666666';studio_chat_create($dir,$env,$principal,$pending);
     $refresh=['grant_type'=>'refresh_token','client_id'=>$client['client_id'],'resource'=>studio_chat_resource($env),'refresh_token'=>$tokens['refresh_token']];
     $rotated=studio_oauth_token($dir,$env,$refresh);check($rotated['refresh_token']!==$tokens['refresh_token'],'refresh rotates');
@@ -85,7 +139,7 @@ try{
     check(studio_oauth_disconnect($dir,'owner')>=1,'owner disconnect revokes all connections');
     $_SERVER['HTTP_AUTHORIZATION']='Bearer '.$badTokens['access_token'];rejects(fn()=>studio_chat_auth($dir,$env),401);
     unset($_SERVER['HTTP_AUTHORIZATION']);$_GET['access_token']=$tokens['access_token'];rejects(fn()=>studio_chat_auth($dir,$env),401);
-    check(count(studio_chat_tools())===6,'all MCP tools exposed');
+    check(count(studio_chat_tools())===7,'all MCP tools exposed');
     $metadata=studio_oauth_metadata($env);check($metadata['authorization_response_iss_parameter_supported']&&$metadata['code_challenge_methods_supported']===['S256'],'issuer and mandatory S256 metadata');
     echo "OK: $count chat/OAuth checks\n";
 }finally{foreach(glob($dir.'/*')as$f)unlink($f);rmdir($dir);}
