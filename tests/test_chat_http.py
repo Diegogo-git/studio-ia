@@ -92,10 +92,22 @@ class ChatHTTPTests(unittest.TestCase):
         status,headers,page=self.call('/oauth.php?'+urlencode({'route':'authorize',**params}))
         self.assertEqual(status,200)
         self.assertIn("form-action 'self' https://chatgpt.com https://chat.openai.com",headers['Content-Security-Policy'])
+        self.assertEqual(headers['Referrer-Policy'],'same-origin')
         if 'Set-Cookie' in headers:
             self.assertIn('HttpOnly',headers['Set-Cookie'])
             self.assertIn('SameSite=Lax',headers['Set-Cookie'])
         csrf=re.search(r'name="csrf" value="([a-f0-9]+)"',page).group(1)
+        # Browser form submissions must retain their origin, not bypass origin or CSRF validation.
+        for origin in ('null','https://evil.test'):
+            status,_,result=self.call('/oauth.php?route=authorize',{'csrf':csrf,'password':'fixture-password-only','decision':decision},form=True,headers={'Origin':origin})
+            self.assertEqual(status,403)
+            self.assertEqual(result['error'],'Origen no autorizado.')
+        status,_,result=self.call('/oauth.php?route=authorize',{'csrf':'bad','password':'fixture-password-only','decision':decision},form=True,headers={'Origin':self.base})
+        self.assertEqual(status,403)
+        status,error_headers,error_page=self.call('/oauth.php?route=authorize',{'csrf':csrf,'password':'invalid-fixture-password','decision':'allow'},form=True,headers={'Origin':self.base})
+        self.assertEqual(status,401)
+        self.assertEqual(error_headers['Referrer-Policy'],'same-origin')
+        self.assertIn('Contraseña incorrecta.',error_page)
         status,headers,result=self.call('/oauth.php?route=authorize',{'csrf':csrf,'password':'fixture-password-only','decision':decision},form=True,headers={'Origin':self.base})
         self.assertEqual(status,303,str(result))
         redirect=urlsplit(headers['Location'])
