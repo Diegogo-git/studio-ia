@@ -153,7 +153,13 @@ class ChatHTTPTests(unittest.TestCase):
         status,_,response=self.rpc(token,'tools/list')
         self.assertEqual(status,200)
         tools={t['name']:t for t in response['result']['tools']}
-        self.assertEqual(len(tools),6)
+        self.assertEqual(len(tools),7)
+        self.assertEqual(tools['studio_import_image']['_meta']['openai/fileParams'],['source_image'])
+        file_schema=tools['studio_import_image']['inputSchema']['properties']['source_image']
+        self.assertEqual(set(file_schema['properties']),{'download_url','file_id','mime_type','file_name'})
+        self.assertEqual(set(file_schema['required']),{'download_url','file_id'})
+        self.assertIn('image_id',tools['studio_create_generation']['inputSchema']['properties'])
+        self.assertEqual(self.rpc(token,'tools/call',{'name':'studio_import_image','arguments':{'request_key':'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'}})[2]['result']['isError'],True)
         self.assertEqual(tools['studio_create_generation']['securitySchemes'][0]['scopes'],['studio:generate'])
         self.assertFalse(tools['studio_create_generation']['annotations']['readOnlyHint'])
         status,_,result=self.rpc(token,'tools/call',{'name':'studio_connection_status','arguments':{}})
