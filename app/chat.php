@@ -57,7 +57,8 @@ function studio_chat_capabilities(string $storage,array $env):array {
     $hf=true;try{studio_hf_key($env);}catch(StudioError $e){$hf=false;}
     return ['app'=>'Studio IA','connection'=>'authenticated','higgsfield_configured'=>$hf,'elevenlabs_configured'=>trim($env['ELEVENLABS_API_KEY']??'')!=='',
         'default_voice_id'=>$env['ELEVENLABS_DEFAULT_VOICE_ID']??'','worker'=>studio_chat_worker_status($storage),
-        'models'=>['image'=>'higgsfield-ai/soul/standard','video'=>'bytedance/seedance-2.0/text-to-video','speech'=>'eleven_multilingual_v2'],
+        'models'=>['image'=>'higgsfield-ai/soul/standard','video'=>'bytedance/seedance-2.0/text-to-video','video_from_image'=>'bytedance/seedance-2.0/image-to-video','speech'=>'eleven_multilingual_v2'],
+        'image_inputs'=>['chatgpt_file'=>true,'https_url'=>true,'studio_image_job'=>true,'max_bytes'=>10485760,'formats'=>['image/jpeg','image/png','image/webp'],'aspect_ratio'=>'from_source_image'],
         'limits'=>['generations_per_hour'=>30,'speech_characters'=>2500,'video_seconds'=>[4,15]],'avatar_lipsync'=>false,'openai_api_used'=>false];
 }
 function studio_chat_media(string $storage,array $job,array $env):array {
@@ -77,6 +78,11 @@ function studio_chat_create(string $storage,array $env,array $principal,array $i
     if(($in['accept_cost']??false)!==true)throw new StudioError('La generación requiere autorización para consumir créditos.');
     $id=$in['request_key']??'';
     if(!is_string($id)||!studio_uuid($id))throw new StudioError('request_key debe ser un UUID que identifique este envío.');
+    if(array_key_exists('image_url',$in))throw new StudioError('Importa primero la imagen y usa su image_id.');
+    if(isset($in['image_id'])){
+        if(($in['kind']??'')!=='video'||!is_string($in['image_id']))throw new StudioError('image_id solo se admite para vídeo.');
+        $asset=studio_image_owned($storage,$in['image_id'],$principal['owner']);$in['image_url']=$asset['url'];
+    }
     if(($in['kind']??'')==='speech' && trim((string)($in['voice_id']??''))==='')$in['voice_id']=$env['ELEVENLABS_DEFAULT_VOICE_ID']??'';
     $input=studio_input($in);$fingerprint=hash('sha256',json_encode($input,JSON_THROW_ON_ERROR));
     // Validate configuration before creating an intent; missing credentials cannot leave an uncertain charge.
@@ -121,6 +127,7 @@ function studio_chat_cancel(string $storage,array $env,array $principal,string $
 function studio_chat_tool(string $name,array $args,string $storage,array $env,array $principal):array {
     $db=$storage.'/jobs.json';
     if($name==='studio_connection_status')return studio_chat_capabilities($storage,$env);
+    if($name==='studio_import_image')return ['image'=>studio_image_import($storage,$env,$principal,$args)];
     if($name==='studio_create_generation')return ['job'=>studio_chat_create($storage,$env,$principal,$args)];
     if($name==='studio_get_generation'){
         $job=studio_owned($db,(string)($args['job_id']??''),$principal['owner']);
@@ -144,11 +151,15 @@ function studio_chat_tool(string $name,array $args,string $storage,array $env,ar
 function studio_chat_tools():array {
     $object=static fn(array $p,array $required=[]):array=>['type'=>'object','properties'=>$p?:new stdClass(),'required'=>$required,'additionalProperties'=>false];
     $s=static fn(string $description):array=>['type'=>'string','description'=>$description];
+    $file=$object(['download_url'=>$s('URL temporal del archivo proporcionada por ChatGPT; no inventarla.'),'file_id'=>$s('Identificador del archivo proporcionado por ChatGPT.'),'mime_type'=>$s('Tipo MIME opcional.'),'file_name'=>$s('Nombre opcional del archivo.')],['download_url','file_id']);
     $definitions=[
         ['studio_connection_status','Comprobar la conexión','Comprueba proveedores configurados, modelos disponibles y si el procesador puede recibir trabajos. No genera contenido.',$object([]),false],
+        ['studio_import_image','Preparar una imagen para animarla','Importa una escena aprobada desde un archivo de ChatGPT, una URL HTTPS o un trabajo de imagen del Studio. Sube la imagen a Higgsfield y devuelve image_id. No genera vídeo. Reutiliza request_key al recuperar el envío.',
+            $object(['request_key'=>['type'=>'string','format'=>'uuid'],'source_image'=>$file,'image_url'=>$s('URL HTTPS de una imagen accesible sin iniciar sesión; alternativa al archivo.'),'image_job_id'=>['type'=>'string','format'=>'uuid','description'=>'Trabajo propio de imagen terminado; alternativa al archivo y a la URL.']],['request_key']),true],
         ['studio_create_generation','Generar contenido','Guarda un único trabajo de imagen, vídeo o locución autorizado por el usuario. Consume créditos al procesarse. Reutiliza request_key al recuperar un envío; nunca crees otro por un tiempo de espera.',
             $object(['request_key'=>['type'=>'string','format'=>'uuid','description'=>'UUID único por intención de generación; reutiliza exactamente el mismo después de una respuesta incierta.'],
                 'kind'=>['type'=>'string','enum'=>['image','video','speech']], 'prompt'=>$s('Descripción visual o texto exacto de la locución. Hasta 6000 caracteres visuales o 2500 de voz.'),
+                'image_id'=>['type'=>'string','format'=>'uuid','description'=>'Para animar una imagen: ID devuelto por studio_import_image. Con image_id el vídeo conserva el formato de la imagen de entrada.'],
                 'accept_cost'=>['type'=>'boolean','description'=>'true únicamente si el usuario ha autorizado esta generación y su consumo de créditos.'],
                 'aspect_ratio'=>['type'=>'string','enum'=>['9:16','16:9','1:1','4:3','3:4'],'default'=>'9:16'],
                 'resolution'=>['type'=>'string','enum'=>['720p','1080p'],'default'=>'720p'],
@@ -163,8 +174,9 @@ function studio_chat_tools():array {
     $tools=[];foreach($definitions as[$name,$title,$description,$schema,$write]){
         $scopes=[$write?'studio:generate':'studio:read'];
         $tools[]=['name'=>$name,'title'=>$title,'description'=>$description,'inputSchema'=>$schema,
-            'annotations'=>['readOnlyHint'=>!$write,'destructiveHint'=>$write,'idempotentHint'=>true,'openWorldHint'=>false],
+            'annotations'=>['readOnlyHint'=>!$write,'destructiveHint'=>$write&&$name!=='studio_import_image','idempotentHint'=>true,'openWorldHint'=>$name==='studio_import_image'],
             'securitySchemes'=>[['type'=>'oauth2','scopes'=>$scopes]],'_meta'=>['securitySchemes'=>[['type'=>'oauth2','scopes'=>$scopes]]]];
+        if($name==='studio_import_image')$tools[array_key_last($tools)]['_meta']['openai/fileParams']=['source_image'];
     }return $tools;
 }
 function studio_chat_mcp(string $storage,array $env):never {
@@ -181,8 +193,8 @@ function studio_chat_mcp(string $storage,array $env):never {
     $params=$in['params']??[];if(!is_array($params))studio_json(['jsonrpc'=>'2.0','id'=>$id,'error'=>['code'=>-32602,'message'=>'Invalid params']],400);
     if($in['method']==='initialize'){
         $version=$params['protocolVersion']??'2025-11-25';if(!in_array($version,['2025-11-25','2025-06-18','2025-03-26'],true))$version='2025-11-25';
-        $result=['protocolVersion'=>$version,'capabilities'=>['tools'=>['listChanged'=>false]],'serverInfo'=>['name'=>'studio-ia-eskalamos','version'=>'1.0.0'],
-            'instructions'=>'Studio IA genera con las cuentas del propietario. Comprueba studio_connection_status. Envía solo trabajos solicitados y con consumo autorizado. Conserva request_key y job_id; ante una respuesta incierta reutiliza el mismo request_key. Consulta estado antes de repetir. No uses los plugins comerciales de Higgsfield o ElevenLabs como sustituto. Los trabajos no son avatares sincronizados. No solicites claves de proveedores.'];
+        $result=['protocolVersion'=>$version,'capabilities'=>['tools'=>['listChanged'=>false]],'serverInfo'=>['name'=>'studio-ia-eskalamos','version'=>'1.1.0'],
+            'instructions'=>'Studio IA genera con las cuentas del propietario. Comprueba studio_connection_status. Para animar una escena aprobada usa studio_import_image con el archivo real de ChatGPT, una URL accesible o un trabajo de imagen propio terminado; después usa su image_id en studio_create_generation con kind=video. No inventes URLs ni archivos. Envía solo trabajos solicitados y con consumo autorizado. Conserva request_key y job_id; ante una respuesta incierta reutiliza el mismo request_key. Consulta estado antes de repetir. No uses los plugins comerciales de Higgsfield o ElevenLabs como sustituto. Los trabajos no son avatares sincronizados. No solicites claves de proveedores.'];
     }elseif($in['method']==='ping')$result=new stdClass();
     elseif($in['method']==='tools/list')$result=['tools'=>studio_chat_tools()];
     elseif($in['method']==='tools/call'){
@@ -208,9 +220,9 @@ function studio_chat_download(string $storage,array $env):never {
 function studio_chat_rest(string $storage,array $env):never {
     studio_chat_origin($env);$op=$_GET['op']??'';
     if($op==='download')studio_chat_download($storage,$env);
-    $names=['status'=>'studio_connection_status','create'=>'studio_create_generation','job'=>'studio_get_generation','jobs'=>'studio_list_generations','voices'=>'studio_list_voices','cancel'=>'studio_cancel_generation'];
+    $names=['status'=>'studio_connection_status','create'=>'studio_create_generation','import-image'=>'studio_import_image','job'=>'studio_get_generation','jobs'=>'studio_list_generations','voices'=>'studio_list_voices','cancel'=>'studio_cancel_generation'];
     if(!is_string($op)||!isset($names[$op]))throw new StudioError('Función no encontrada.',404);
-    $write=in_array($op,['create','cancel'],true);
+    $write=in_array($op,['create','cancel','import-image'],true);
     try{$principal=studio_chat_auth($storage,$env,$write?'studio:generate':'studio:read');}catch(StudioError $e){studio_chat_auth_error($e,$env);}
     if(($_SERVER['REQUEST_METHOD']??'')!==($write?'POST':'GET'))throw new StudioError('Método no permitido.',405);
     studio_chat_limit($storage,'rest',600,300);$args=$write?studio_chat_body():$_GET;
