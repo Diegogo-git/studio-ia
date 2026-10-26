@@ -1,5 +1,21 @@
 # Conexión de ChatGPT con Studio IA
 
+## Animar imágenes aprobadas
+
+El Studio incorpora `studio_import_image` y Seedance 2.0 Image to Video. Flujo: crear o adjuntar una escena, aprobarla, importarla a Higgsfield y pedir un vídeo con el `image_id` devuelto. La importación no genera vídeo. La generación requiere autorización de consumo y un `request_key` distinto del de importación; cada uno se reutiliza ante una respuesta incierta.
+
+La herramienta de importación admite exactamente una fuente: `source_image`, un archivo enlazado por ChatGPT mediante `openai/fileParams`; `image_url`, una imagen HTTPS accesible sin sesión; o `image_job_id`, un trabajo de imagen propio terminado. No inventar URLs ni referencias de archivos. Si ChatGPT no entrega el archivo, volver a adjuntarlo o utilizar una URL accesible. No enviar base64 en el prompt. Para archivos de ChatGPT, se transfiere el archivo real, no una nueva descripción de su contenido.
+
+El servidor valida PNG, JPEG o WebP por sus bytes, hasta 10 MiB, entre 256 y 8192 píxeles por lado y hasta 36 megapíxeles. Rechaza direcciones privadas o reservadas, fija la IP validada en cada conexión HTTPS y valida cada redirección. Sube el archivo con la URL firmada de Higgsfield y las cabeceras de almacenamiento indicadas, sin enviar credenciales de proveedor a ese destino. Guarda únicamente metadatos y la URL de referencia de Higgsfield; no guarda el enlace temporal de descarga de ChatGPT.
+
+En `studio_create_generation`, `kind=video` junto con `image_id` selecciona `bytedance/seedance-2.0/image-to-video`. El formato lo determina la imagen inicial: preparar la escena en 9:16 para un Reel. Se mantienen 720p/1080p, 4 a 15 segundos y `generate_audio=false` como valor inicial. No se envía `aspect_ratio` al endpoint de imagen a vídeo, porque su esquema no lo declara. No se promete conservar cada detalle durante el movimiento ni crear un montaje final.
+
+Ejemplo: “@Studio IA, importa esta imagen aprobada y anímala con una aproximación de cámara muy suave, sin cambiar su composición. Un clip de 5 segundos, 720p, sin audio. Autorizo el consumo de ese único vídeo”. La imagen se comparte con Higgsfield para procesar esa solicitud. Mantener el audio de ElevenLabs como recurso separado para edición.
+
+Después del despliegue, actualizar el catálogo de herramientas de Studio IA en ChatGPT para que aparezca `studio_import_image` y el parámetro `image_id`. La autorización OAuth existente conserva sus mismos permisos; el chat puede necesitar volver a seleccionar o conectar la aplicación. El endpoint REST equivalente de importación es `POST /studio-api.php?op=import-image`, con el mismo OAuth y cuerpo JSON.
+
+Fuentes: https://open.higgsfield.ai/models/bytedance/seedance-2.0/image-to-video/api-reference · https://docs.higgsfield.ai/docs/concepts/file-uploads · https://developers.openai.com/plugins/reference#file-apis
+
 Este cambio añade un servidor MCP privado para solicitar imágenes, vídeos desde texto y locuciones desde una conversación. Usa el saldo y las claves de Higgsfield y ElevenLabs guardadas en el hosting. El servidor no llama a la API de OpenAI. ChatGPT puede exigir un plan con acceso a plugins/conexiones MCP personalizadas; la disponibilidad de esta función en la cuenta se comprueba al instalar la conexión.
 
 **Estado de esta entrega:** código y pruebas locales preparados. No implica que esté desplegado ni que la conexión esté instalada en ChatGPT. La cuenta del Studio debe tener contraseña propia antes de conectar. No enviar esa contraseña ni claves de proveedores en el chat.
@@ -59,13 +75,14 @@ El chat recibe inmediatamente un ID del trabajo en estado `prepared`. El cron lo
 
 Los enlaces de imagen y vídeo son del proveedor y pueden caducar. El audio se sirve mediante un enlace temporal de diez minutos; consultar de nuevo el trabajo genera otro enlace. El historial también se ve en el panel privado.
 
-**Alcance:** imágenes Soul Standard; vídeo desde texto Seedance 2.0 de 4 a 15 segundos; voz ElevenLabs Multilingual v2 con ID editable, búsqueda y velocidad. No incluye sincronización labial de un avatar ni montaje automático del vídeo con la locución. Son trabajos separados.
+**Alcance:** imágenes Soul Standard; vídeo desde texto o desde una imagen aprobada con Seedance 2.0 de 4 a 15 segundos; voz ElevenLabs Multilingual v2 con ID editable, búsqueda y velocidad. No incluye sincronización labial de un avatar ni montaje automático del vídeo con la locución. Son trabajos separados.
 
 ## Herramientas disponibles
 
 | Herramienta | Función | Permiso |
 |---|---|---|
 | `studio_connection_status` | Proveedores configurados, modelos, voz predeterminada y cron | `studio:read` |
+| `studio_import_image` | Transferir una escena aprobada a Higgsfield y obtener su image_id | `studio:generate` |
 | `studio_create_generation` | Guardar una generación autorizada en la cola | `studio:generate` |
 | `studio_get_generation` | Consultar estado y resultado de un trabajo propio | `studio:read` |
 | `studio_list_generations` | Consultar historial propio | `studio:read` |
