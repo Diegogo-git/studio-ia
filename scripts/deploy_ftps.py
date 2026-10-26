@@ -28,7 +28,7 @@ PUBLIC_FILES = (
     "public/.well-known/oauth-authorization-server/oauth.php",
     "public/.well-known/oauth-protected-resource/mcp.php",
 )
-PRIVATE_FILES = ("app/entry.php", "app/chat.php", "app/oauth.php")
+PRIVATE_FILES = ("app/entry.php", "app/chat.php", "app/oauth.php", "app/images.php")
 MARKER = b"STUDIO_IA_FRONT_CONTROLLER_V1"
 MAX_REMOTE_BYTES = 1024 * 1024
 
