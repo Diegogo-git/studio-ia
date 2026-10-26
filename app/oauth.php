@@ -109,6 +109,9 @@ function studio_oauth_session():void {
 function studio_oauth_form(string $nonce,string $csrf,array $request,string $error=''):never {
     $escape=static fn(string $s):string=>htmlspecialchars($s,ENT_QUOTES,'UTF-8');
     header('Content-Type: text/html; charset=utf-8');
+    // no-referrer makes browsers send Origin: null for native form POSTs.
+    // Keep the real origin for this same-origin consent form without leaking its URL externally.
+    header('Referrer-Policy: same-origin');
     // Chromium applies form-action to the final OAuth redirect as well as the POST.
     header("Content-Security-Policy: default-src 'none'; style-src 'nonce-$nonce'; frame-ancestors 'none'; base-uri 'none'; form-action 'self' https://chatgpt.com https://chat.openai.com");
     $read=in_array('studio:read',$request['scopes'],true);$write=in_array('studio:generate',$request['scopes'],true);
